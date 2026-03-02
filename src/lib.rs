@@ -26,12 +26,14 @@ mod volume;
 
 pub use btree::{BTree, BTreeKeyCmp};
 use byteorder::{LittleEndian, ReadBytesExt};
-pub use fstree::{DirEntry, FsTree, InodeVal, JKey, is_dir_mode, apfs_kind, apfs_mode_to_string, fmt_apfs_ns_utc};
+pub use fstree::{
+    DirEntry, FsTree, InodeVal, JKey, apfs_kind, apfs_mode_to_string, fmt_apfs_ns_utc, is_dir_mode,
+};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 pub use volume::ApfsVolumeSuperblock;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::omap::Omap;
@@ -142,11 +144,22 @@ fn fmt_uuid(u: &[u8; 16]) -> String {
     // Standard display: 8-4-4-4-12
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        u[0], u[1], u[2], u[3],
-        u[4], u[5],
-        u[6], u[7],
-        u[8], u[9],
-        u[10], u[11], u[12], u[13], u[14], u[15],
+        u[0],
+        u[1],
+        u[2],
+        u[3],
+        u[4],
+        u[5],
+        u[6],
+        u[7],
+        u[8],
+        u[9],
+        u[10],
+        u[11],
+        u[12],
+        u[13],
+        u[14],
+        u[15],
     )
 }
 
@@ -346,7 +359,6 @@ pub struct APFS<T: Read + Seek> {
     #[serde(skip)]
     pub(crate) active_xid: u64,
 }
-
 
 impl<T: Read + Seek> APFS<T> {
     /// Returns the APFS logical block size in bytes.
@@ -665,8 +677,6 @@ impl<T: Read + Seek> APFS<T> {
         Ok(())
     }
 
-
-
     fn open_container_omap_for_xid(&mut self, xid: u64) -> Result<crate::omap::Omap, String> {
         let direct = crate::omap::Omap::open(self, self.nx.omap_oid);
         match direct {
@@ -872,8 +882,8 @@ impl<T: Read + Seek> APFS<T> {
             if scanned > MAX_SNAP_KEYS {
                 break;
             }
-            if let Some(h) = crate::fstree::JKey::from_bytes(&k) {
-                if h.obj_type == 1 && v.len() >= 16 {
+            if let Some(h) = crate::fstree::JKey::from_bytes(&k)
+                && h.obj_type == 1 && v.len() >= 16 {
                     let p0 = u64::from_le_bytes(v[0..8].try_into().unwrap());
                     let p1 = u64::from_le_bytes(v[8..16].try_into().unwrap());
                     if let Some(found) =
@@ -887,7 +897,6 @@ impl<T: Read + Seek> APFS<T> {
                         return Ok(Some(found));
                     }
                 }
-            }
 
             let slots = (v.len() / 8).min(32);
             for i in 0..slots {
@@ -920,8 +929,8 @@ impl<T: Read + Seek> APFS<T> {
         }
 
         for oid in candidates {
-            if let Ok((xid, _m)) = omap.lookup_with_key_xid(self, oid, effective_xid) {
-                if let Ok(tree) = crate::btree::BTree::open_virtual(self, oid, omap, xid) {
+            if let Ok((xid, _m)) = omap.lookup_with_key_xid(self, oid, effective_xid)
+                && let Ok(tree) = crate::btree::BTree::open_virtual(self, oid, omap, xid) {
                     let trial = crate::fstree::FsTree::new(omap.clone(), tree.clone(), xid);
                     match trial.detect_root_inode_id(self) {
                         Ok(Some(_)) => {
@@ -940,10 +949,9 @@ impl<T: Read + Seek> APFS<T> {
                         }
                     }
                 }
-            }
 
-            if oid < self.nx.block_count {
-                if let Ok(tree) = crate::btree::BTree::open_physical(self, oid) {
+            if oid < self.nx.block_count
+                && let Ok(tree) = crate::btree::BTree::open_physical(self, oid) {
                     let trial =
                         crate::fstree::FsTree::new(omap.clone(), tree.clone(), effective_xid);
                     match trial.detect_root_inode_id(self) {
@@ -963,7 +971,6 @@ impl<T: Read + Seek> APFS<T> {
                         }
                     }
                 }
-            }
         }
 
         warn!("snapshot fallback: no viable alternate fs tree");
@@ -1049,13 +1056,11 @@ impl<T: Read + Seek> APFS<T> {
 
         for xid in xids {
             let mut omap_paddrs = Vec::<u64>::new();
-            if let Ok(container_omap) = self.open_container_omap_for_xid(xid) {
-                if let Ok(m) = container_omap.lookup(self, vol.omap_oid, xid) {
-                    if m.paddr < self.nx.block_count {
+            if let Ok(container_omap) = self.open_container_omap_for_xid(xid)
+                && let Ok(m) = container_omap.lookup(self, vol.omap_oid, xid)
+                    && m.paddr < self.nx.block_count {
                         omap_paddrs.push(m.paddr);
                     }
-                }
-            }
             if vol.omap_oid < self.nx.block_count && !omap_paddrs.contains(&vol.omap_oid) {
                 omap_paddrs.push(vol.omap_oid);
             }

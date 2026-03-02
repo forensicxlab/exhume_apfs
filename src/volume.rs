@@ -1,6 +1,6 @@
 //! APFS volume superblock (`APSB`) parsing.
 
-use crate::object::{ObjPhys, OBJ_PHYS_SIZE};
+use crate::object::{OBJ_PHYS_SIZE, ObjPhys};
 use serde::{Deserialize, Serialize};
 
 const APSB_MAGIC: u32 = u32::from_le_bytes(*b"APSB");

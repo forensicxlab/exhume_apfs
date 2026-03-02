@@ -2,10 +2,15 @@
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{TimeZone, Utc};
-use prettytable::{row, Table};
+use prettytable::{Table, row};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+pub type ScanAllRecordsResult = (
+    std::collections::HashMap<u64, InodeVal>,
+    std::collections::HashMap<u64, Vec<DirEntry>>,
+);
 
 use crate::btree::{BTree, BTreeKeyCmp};
 use crate::omap::Omap;
@@ -308,11 +313,10 @@ fn parse_xfields_find_dstream(xfields: &[u8]) -> Result<Option<JDStream>, String
             break;
         }
         let data = &xfields[data_off..data_off + x_size];
-        if x_type == INO_EXT_TYPE_DSTREAM {
-            if let Ok(ds) = JDStream::parse(data) {
+        if x_type == INO_EXT_TYPE_DSTREAM
+            && let Ok(ds) = JDStream::parse(data) {
                 return Ok(Some(ds));
             }
-        }
         data_off += x_size;
     }
 
@@ -333,7 +337,6 @@ pub struct DirEntry {
     /// Time the entry was added to the directory.
     pub date_added: u64,
 }
-
 
 /// File extent mapping for one owner id.
 ///
@@ -509,11 +512,10 @@ impl FsTree {
         }
 
         self.build_inode_indexes(apfs)?;
-        if let Some(idx) = self.inode_lookup.borrow().as_ref() {
-            if let Some(inode) = idx.get(&inode_id) {
+        if let Some(idx) = self.inode_lookup.borrow().as_ref()
+            && let Some(inode) = idx.get(&inode_id) {
                 return Ok(Some(inode.clone()));
             }
-        }
         Ok(None)
     }
 
@@ -598,7 +600,6 @@ impl FsTree {
         self.dir_children_raw(apfs, dir_id)
     }
 
-
     /// Lists file extents for an owner id.
     pub fn file_extents<T: std::io::Read + std::io::Seek>(
         &self,
@@ -642,23 +643,30 @@ impl FsTree {
         Ok(out)
     }
 
-
-
     /// Scans the entire BTree sequentially and returns all Inodes and Directory Records.
     /// This avoids O(N log N) disk seeks during full filesystem enumeration.
     pub fn scan_all_records<T: std::io::Read + std::io::Seek>(
         &self,
         apfs: &mut crate::APFS<T>,
-    ) -> Result<(std::collections::HashMap<u64, InodeVal>, std::collections::HashMap<u64, Vec<DirEntry>>), String> {
+        mut progress: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<ScanAllRecordsResult, String> {
         apfs.set_active_omap(Some(self.omap.clone()), self.xid);
         let mut cur = self.root_tree.seek(apfs, &[], &BTreeKeyCmp::Lex)?;
-        
+
         let mut inodes = std::collections::HashMap::new();
         let mut raw_drecs = Vec::new();
         let mut private_to_id = std::collections::HashMap::new();
+        let mut scanned = 0;
 
         while let Some((k, v)) = cur.next(apfs)? {
-            let Some(hdr) = JKey::from_bytes(&k) else { continue; };
+            scanned += 1;
+            if scanned % 10000 == 0
+                && let Some(cb) = progress.as_mut() {
+                    cb(scanned);
+                }
+            let Some(hdr) = JKey::from_bytes(&k) else {
+                continue;
+            };
             if hdr.obj_type == APFS_TYPE_INODE {
                 if let Ok(inode) = InodeVal::parse(&v) {
                     inodes.insert(hdr.obj_id, inode.clone());
@@ -667,19 +675,23 @@ impl FsTree {
             } else if hdr.obj_type == APFS_TYPE_DIR_REC {
                 let name = parse_drec_name(&k).unwrap_or_else(|| "<non-utf8>".to_string());
                 if let Some(drec) = DrecVal::parse(&v) {
-                    raw_drecs.push((hdr.obj_id, DirEntry {
-                        name,
-                        raw_id: drec.file_id,
-                        inode_id: None,
-                        flags: drec.flags,
-                        date_added: drec.date_added,
-                    }));
+                    raw_drecs.push((
+                        hdr.obj_id,
+                        DirEntry {
+                            name,
+                            raw_id: drec.file_id,
+                            inode_id: None,
+                            flags: drec.flags,
+                            date_added: drec.date_added,
+                        },
+                    ));
                 }
             }
         }
 
         // Resolve inode_ids for all drecs
-        let mut drecs: std::collections::HashMap<u64, Vec<DirEntry>> = std::collections::HashMap::new();
+        let mut drecs: std::collections::HashMap<u64, Vec<DirEntry>> =
+            std::collections::HashMap::new();
         for (parent_id, mut entry) in raw_drecs {
             if inodes.contains_key(&entry.raw_id) {
                 entry.inode_id = Some(entry.raw_id);
@@ -701,11 +713,10 @@ impl FsTree {
         &self,
         apfs: &mut crate::APFS<T>,
     ) -> Result<Option<u64>, String> {
-        if let Some(inode2) = self.inode_by_id(apfs, 2)? {
-            if is_dir_mode(inode2.mode) {
+        if let Some(inode2) = self.inode_by_id(apfs, 2)?
+            && is_dir_mode(inode2.mode) {
                 return Ok(Some(2));
             }
-        }
         Ok(None)
     }
 }
@@ -744,8 +755,6 @@ fn parse_drec_name(k: &[u8]) -> Option<String> {
         .ok()
         .map(ToString::to_string)
 }
-
-
 
 #[derive(Debug, Clone)]
 struct DrecVal {

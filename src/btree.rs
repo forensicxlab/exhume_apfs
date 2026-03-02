@@ -264,7 +264,10 @@ impl Node {
                     if v_off_usize <= node_size {
                         node_size - v_off_usize
                     } else {
-                        return Err(format!("val offset underflow: v_off={} val_end={} node_size={}", v_off_usize, val_end, node_size));
+                        return Err(format!(
+                            "val offset underflow: v_off={} val_end={} node_size={}",
+                            v_off_usize, val_end, node_size
+                        ));
                     }
                 };
                 let v1 = v0 + val_len;
@@ -285,12 +288,13 @@ impl Node {
                 }
                 let v0 = if v_off_usize <= val_end {
                     val_end - v_off_usize
+                } else if v_off_usize <= node_size {
+                    node_size - v_off_usize
                 } else {
-                    if v_off_usize <= node_size {
-                        node_size - v_off_usize
-                    } else {
-                        return Err(format!("var val offset underflow: v_off={} val_end={} node_size={}", v_off_usize, val_end, node_size));
-                    }
+                    return Err(format!(
+                        "var val offset underflow: v_off={} val_end={} node_size={}",
+                        v_off_usize, val_end, node_size
+                    ));
                 };
                 let v1 = v0 + (v.len as usize);
                 if v1 > buf.len() {
@@ -374,7 +378,6 @@ pub struct BTree {
     root_paddr: u64,
 }
 
-
 impl BTreeCursor {
     pub fn current_key_gt_target(&self) -> bool {
         self.state.gt_target
@@ -436,12 +439,11 @@ impl BTree {
             for has_obj_header in parse_modes {
                 match Node::parse(&buf, read_len, has_obj_header) {
                     Ok(v) => {
-                        if has_obj_header {
-                            if let Err(e) = v.hdr.obj.validate(&buf) {
+                        if has_obj_header
+                            && let Err(e) = v.hdr.obj.validate(&buf) {
                                 last_err = e;
                                 continue;
                             }
-                        }
                         root_opt = Some(v);
                         break;
                     }
@@ -561,11 +563,10 @@ impl BTree {
                         let Ok(n) = parsed else {
                             continue;
                         };
-                        if n.has_obj_header {
-                            if n.hdr.obj.validate(&b).is_err() {
+                        if n.has_obj_header
+                            && n.hdr.obj.validate(&b).is_err() {
                                 continue;
                             }
-                        }
                         loaded = Some((paddr, b));
                         break;
                     }
@@ -598,11 +599,10 @@ impl BTree {
         cmp: &BTreeKeyCmp,
     ) -> Result<Option<Vec<u8>>, String> {
         let mut cur = self.seek(apfs, key, cmp)?;
-        if let Some((k, v)) = cur.current(apfs)? {
-            if cmp_keys(cmp, &k, key) == std::cmp::Ordering::Equal {
+        if let Some((k, v)) = cur.current(apfs)?
+            && cmp_keys(cmp, &k, key) == std::cmp::Ordering::Equal {
                 return Ok(Some(v));
             }
-        }
         Ok(None)
     }
 
@@ -615,7 +615,6 @@ impl BTree {
     ) -> Result<BTreeCursor, String> {
         BTreeCursor::seek(self, apfs, key, cmp)
     }
-
 }
 
 /// Stateful cursor/iterator
@@ -827,7 +826,9 @@ impl BTreeCursor {
 
                 // BUG FIX: Push the current level back with the ADVANCED index
                 // so we don't skip its subsequent siblings after we're done with this branch.
-                self.state.stack.push((nid, npaddr, node.clone(), next_child));
+                self.state
+                    .stack
+                    .push((nid, npaddr, node.clone(), next_child));
 
                 let mut cur_id = first_child;
                 let mut cur_paddr = first_paddr;

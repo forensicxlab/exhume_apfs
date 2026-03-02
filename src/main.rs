@@ -1,9 +1,9 @@
 use clap::*;
 use clap_num::maybe_hex;
-use exhume_apfs::{apfs_kind, apfs_mode_to_string, fmt_apfs_ns_utc, APFS};
+use exhume_apfs::{APFS, apfs_kind, apfs_mode_to_string, fmt_apfs_ns_utc};
 use exhume_body::{Body, BodySlice};
-use log::{debug, error, info, LevelFilter};
-use prettytable::{row, Table};
+use log::{LevelFilter, debug, error, info};
+use prettytable::{Table, row};
 use serde_json::{self, json};
 
 const MAX_DUMP_BYTES: u64 = 512 * 1024 * 1024;
@@ -11,7 +11,22 @@ const MAX_DUMP_BYTES: u64 = 512 * 1024 * 1024;
 fn fmt_uuid(u: &[u8; 16]) -> String {
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]
+        u[0],
+        u[1],
+        u[2],
+        u[3],
+        u[4],
+        u[5],
+        u[6],
+        u[7],
+        u[8],
+        u[9],
+        u[10],
+        u[11],
+        u[12],
+        u[13],
+        u[14],
+        u[15]
     )
 }
 
@@ -274,7 +289,6 @@ fn main() {
         }
         return;
     }
-
 
     let mut vol_candidates: Vec<_> = apfs
         .volumes
