@@ -501,13 +501,15 @@ fn main() {
                     for e in &ext {
                         max_end = max_end.max(e.logical_addr.saturating_add(e.length_bytes));
                     }
-                    // Size selection:
-                    // 1) If extents exist, trust extent coverage (most robust on variant inode layouts).
-                    // 2) Otherwise, only trust declared inode size if it is plausible.
-                    let out_size = if max_end > 0 {
+                    // Size selection: prefer the declared logical size (from dstream or
+                    // uncompressed_size) because it is byte-exact.  Fall back to extent
+                    // coverage (max_end) only when no declared size is available — extent
+                    // lengths are block-aligned and would append spurious null bytes.
+                    let out_size = if declared_size > 0 && declared_size <= MAX_DUMP_BYTES {
+                        // Cap at extent coverage: cannot extract bytes beyond what is on disk.
+                        if max_end > 0 { declared_size.min(max_end) } else { declared_size }
+                    } else if max_end > 0 {
                         max_end
-                    } else if declared_size > 0 && declared_size <= MAX_DUMP_BYTES {
-                        declared_size
                     } else {
                         error!(
                             "refusing dump for inode_id={} (no extent-backed content, declared_size={})",

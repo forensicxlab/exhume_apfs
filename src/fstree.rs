@@ -290,10 +290,13 @@ fn parse_xfields_find_dstream(xfields: &[u8]) -> Result<Option<JDStream>, String
 
     // x_field_t is 4 bytes: u8 type, u8 flags, u16 size
     let mut meta_off = 4;
-    let mut data_off = 4 + (num * 4);
-    if data_off > xfields.len() {
+    // Data section starts after the header (4 bytes) and all meta entries (num * 4 bytes).
+    let data_section_start = 4 + (num * 4);
+    if data_section_start > xfields.len() {
         return Ok(None);
     }
+    // Track offset within the data section; each entry's data is 8-byte aligned within it.
+    let mut data_off_in_section = 0usize;
 
     for _ in 0..num {
         if meta_off + 4 > xfields.len() {
@@ -305,19 +308,19 @@ fn parse_xfields_find_dstream(xfields: &[u8]) -> Result<Option<JDStream>, String
             u16::from_le_bytes(xfields[meta_off + 2..meta_off + 4].try_into().unwrap()) as usize;
         meta_off += 4;
 
-        // data is 8-byte aligned
-        let aligned = (data_off + 7) & !7;
-        data_off = aligned;
+        // 8-byte alignment is within the data section, not from the xf_blob start.
+        let aligned_in_section = (data_off_in_section + 7) & !7;
+        let abs_off = data_section_start + aligned_in_section;
 
-        if data_off + x_size > xfields.len() {
+        if abs_off + x_size > xfields.len() {
             break;
         }
-        let data = &xfields[data_off..data_off + x_size];
+        let data = &xfields[abs_off..abs_off + x_size];
         if x_type == INO_EXT_TYPE_DSTREAM
             && let Ok(ds) = JDStream::parse(data) {
                 return Ok(Some(ds));
             }
-        data_off += x_size;
+        data_off_in_section = aligned_in_section + x_size;
     }
 
     Ok(None)
