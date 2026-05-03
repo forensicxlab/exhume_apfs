@@ -499,7 +499,7 @@ impl FsTree {
         // seek near the target and scan a small window for an inode with matching id.
         let mut cur = self.root_tree.seek(apfs, &k, &BTreeKeyCmp::ApfsJKey)?;
         let mut scanned = 0usize;
-        const MAX_SCAN_KEYS: usize = 200_000;
+        const MAX_SCAN_KEYS: usize = 64;
         while let Some((kk, vv)) = cur.next(apfs)? {
             scanned += 1;
             if scanned > MAX_SCAN_KEYS {
