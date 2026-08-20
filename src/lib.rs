@@ -27,7 +27,15 @@ mod volume;
 pub use btree::{BTree, BTreeKeyCmp};
 use byteorder::{LittleEndian, ReadBytesExt};
 pub use fstree::{
-    DirEntry, FsTree, InodeVal, JKey, apfs_kind, apfs_mode_to_string, fmt_apfs_ns_utc, is_dir_mode,
+    BSD_UF_COMPRESSED, DirEntry, FileExtent, FsTree, INO_EXT_TYPE_DELTA_TREE_OID,
+    INO_EXT_TYPE_DIR_STATS_KEY, INO_EXT_TYPE_DOCUMENT_ID, INO_EXT_TYPE_DSTREAM,
+    INO_EXT_TYPE_FINDER_INFO, INO_EXT_TYPE_FS_UUID, INO_EXT_TYPE_NAME,
+    INO_EXT_TYPE_ORIG_SYNC_ROOT_ID, INO_EXT_TYPE_PREV_FSIZE, INO_EXT_TYPE_PURGEABLE_FLAGS,
+    INO_EXT_TYPE_RDEV, INO_EXT_TYPE_SNAP_XID, INO_EXT_TYPE_SPARSE_BYTES,
+    INODE_HAS_UNCOMPRESSED_SIZE, InodeVal, InodeXField, JDStream, JKey, ScanAllRecordsResult,
+    ScanAllRecordsWithXattrsResult, XATTR_DATA_EMBEDDED, XATTR_DATA_STREAM,
+    XATTR_FILE_SYSTEM_OWNED, XATTR_RESERVED_8, XattrRecord, XattrStorage, apfs_kind,
+    apfs_mode_to_string, fmt_apfs_ns_utc, is_dir_mode,
 };
 use log::{info, warn};
 use serde::{Deserialize, Serialize};

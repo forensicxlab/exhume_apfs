@@ -12,6 +12,13 @@ pub type ScanAllRecordsResult = (
     std::collections::HashMap<u64, Vec<DirEntry>>,
 );
 
+/// Result of a single filesystem-tree scan that also retains extended attributes.
+pub type ScanAllRecordsWithXattrsResult = (
+    std::collections::HashMap<u64, InodeVal>,
+    std::collections::HashMap<u64, Vec<DirEntry>>,
+    std::collections::HashMap<u64, Vec<XattrRecord>>,
+);
+
 use crate::btree::{BTree, BTreeKeyCmp};
 use crate::omap::Omap;
 
@@ -19,13 +26,55 @@ const J_KEY_OBJ_ID_MASK: u64 = 0x0fff_ffff_ffff_ffff;
 const J_KEY_TYPE_MASK: u64 = 0xf000_0000_0000_0000;
 const J_KEY_TYPE_SHIFT: u64 = 60;
 
-// j_obj_types values you need
+// File-system object types used by this parser.
 const APFS_TYPE_INODE: u8 = 3;
+const APFS_TYPE_XATTR: u8 = 4;
 const APFS_TYPE_FILE_EXTENT: u8 = 8;
 const APFS_TYPE_DIR_REC: u8 = 9;
 
-// inode ext field types
-const INO_EXT_TYPE_DSTREAM: u8 = 8;
+/// Inode extended-field type: snapshot transaction identifier.
+pub const INO_EXT_TYPE_SNAP_XID: u8 = 1;
+/// Inode extended-field type: snapshot extent-delta tree object identifier.
+pub const INO_EXT_TYPE_DELTA_TREE_OID: u8 = 2;
+/// Inode extended-field type: document identifier.
+pub const INO_EXT_TYPE_DOCUMENT_ID: u8 = 3;
+/// Inode extended-field type: filename.
+pub const INO_EXT_TYPE_NAME: u8 = 4;
+/// Inode extended-field type: previous file size.
+pub const INO_EXT_TYPE_PREV_FSIZE: u8 = 5;
+/// Inode extended-field type: Finder information.
+pub const INO_EXT_TYPE_FINDER_INFO: u8 = 7;
+/// Inode extended-field type: data-stream metadata.
+pub const INO_EXT_TYPE_DSTREAM: u8 = 8;
+/// Inode extended-field type: directory-statistics key.
+pub const INO_EXT_TYPE_DIR_STATS_KEY: u8 = 10;
+/// Inode extended-field type: mounted filesystem UUID.
+pub const INO_EXT_TYPE_FS_UUID: u8 = 11;
+/// Inode extended-field type: number of sparse bytes.
+pub const INO_EXT_TYPE_SPARSE_BYTES: u8 = 13;
+/// Inode extended-field type: block/character device identifier.
+pub const INO_EXT_TYPE_RDEV: u8 = 14;
+/// Inode extended-field type: purgeable-file flags.
+pub const INO_EXT_TYPE_PURGEABLE_FLAGS: u8 = 15;
+/// Inode extended-field type: original sync-root inode identifier.
+pub const INO_EXT_TYPE_ORIG_SYNC_ROOT_ID: u8 = 16;
+
+/// Extended-attribute data is stored in a separate APFS data stream.
+pub const XATTR_DATA_STREAM: u16 = 0x0001;
+/// Extended-attribute data is embedded directly in the filesystem-tree record.
+pub const XATTR_DATA_EMBEDDED: u16 = 0x0002;
+/// Extended-attribute record is owned by the filesystem.
+pub const XATTR_FILE_SYSTEM_OWNED: u16 = 0x0004;
+/// Reserved extended-attribute flag observed on disk.
+pub const XATTR_RESERVED_8: u16 = 0x0008;
+
+/// Inode internal flag indicating that `uncompressed_size` is meaningful.
+pub const INODE_HAS_UNCOMPRESSED_SIZE: u64 = 0x0004_0000;
+/// BSD user flag marking a filesystem-compressed file.
+pub const BSD_UF_COMPRESSED: u32 = 0x0000_0020;
+
+const J_INODE_VAL_FIXED_SIZE: usize = 92;
+const MAX_XATTR_READ_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Parsed APFS filesystem key header (`j_key_t`).
 ///
@@ -59,13 +108,98 @@ impl JKey {
 }
 
 /// Parsed data stream metadata from inode xfields (`j_dstream_t`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JDStream {
     pub size: u64,
     pub alloced_size: u64,
     pub default_crypto_id: u64,
     pub total_bytes_written: u64,
     pub total_bytes_read: u64,
+}
+
+/// One descriptor and value from an inode's `xf_blob_t` extended-field list.
+///
+/// The value remains raw so callers do not lose fields that this crate does not
+/// yet interpret. Convenience accessors cover the integer, string, and dstream
+/// forms used by the APFS specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InodeXField {
+    pub field_type: u8,
+    pub flags: u8,
+    pub data: Vec<u8>,
+}
+
+impl InodeXField {
+    pub fn as_u64(&self) -> Option<u64> {
+        let bytes: [u8; 8] = self.data.get(..8)?.try_into().ok()?;
+        Some(u64::from_le_bytes(bytes))
+    }
+
+    pub fn as_u32(&self) -> Option<u32> {
+        let bytes: [u8; 4] = self.data.get(..4)?.try_into().ok()?;
+        Some(u32::from_le_bytes(bytes))
+    }
+
+    pub fn as_utf8(&self) -> Option<&str> {
+        let end = self
+            .data
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(self.data.len());
+        std::str::from_utf8(&self.data[..end]).ok()
+    }
+
+    pub fn as_dstream(&self) -> Option<JDStream> {
+        (self.field_type == INO_EXT_TYPE_DSTREAM)
+            .then(|| JDStream::parse(&self.data).ok())
+            .flatten()
+    }
+}
+
+/// Storage descriptor for one APFS extended attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "storage", rename_all = "snake_case")]
+pub enum XattrStorage {
+    /// Value bytes live inside the filesystem-tree record.
+    Embedded { data: Vec<u8> },
+    /// Value bytes are described by file extents owned by `xattr_obj_id`.
+    DataStream {
+        xattr_obj_id: u64,
+        dstream: JDStream,
+    },
+    /// A valid record with a flag combination that this crate does not decode.
+    Unknown { data: Vec<u8> },
+}
+
+/// Parsed `j_xattr_key_t` plus `j_xattr_val_t` record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XattrRecord {
+    /// Inode/object identifier from the xattr key header.
+    pub owner_id: u64,
+    pub name: String,
+    pub flags: u16,
+    /// The on-disk `xdata_len`; some embedded records legitimately store zero.
+    pub declared_data_len: u16,
+    pub storage: XattrStorage,
+}
+
+impl XattrRecord {
+    pub fn embedded_data(&self) -> Option<&[u8]> {
+        match &self.storage {
+            XattrStorage::Embedded { data } => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn data_stream(&self) -> Option<(u64, &JDStream)> {
+        match &self.storage {
+            XattrStorage::DataStream {
+                xattr_obj_id,
+                dstream,
+            } => Some((*xattr_obj_id, dstream)),
+            _ => None,
+        }
+    }
 }
 
 impl JDStream {
@@ -89,7 +223,7 @@ impl JDStream {
 ///
 /// Corresponds to `j_inode_val_t`. Note that some fields are extracted from
 /// variable-length xfields (extended fields) that follow the fixed header.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InodeVal {
     /// Inode ID of the parent directory.
     pub parent_id: u64,
@@ -117,13 +251,14 @@ pub struct InodeVal {
     pub uncompressed_size: u64,
     /// Optional data stream descriptor (for regular files).
     pub dstream: Option<JDStream>,
+    /// All parsed inode extended fields, including fields unknown to this crate.
+    pub xfields: Vec<InodeXField>,
 }
 
 impl InodeVal {
     /// Parses an inode record value.
     pub fn parse(buf: &[u8]) -> Result<Self, String> {
-        // ... (existing implementation)
-        if buf.len() < 88 {
+        if buf.len() < J_INODE_VAL_FIXED_SIZE {
             return Err("j_inode_val_t too small".into());
         }
         let mut c = std::io::Cursor::new(buf);
@@ -145,10 +280,22 @@ impl InodeVal {
         let _pad1 = c.read_u16::<LittleEndian>().map_err(|e| e.to_string())?;
         let mut uncompressed_size = c.read_u64::<LittleEndian>().map_err(|e| e.to_string())?;
 
-        // APFS inode xfields are version-dependent; try multiple plausible starts.
-        let dstream = parse_xfields_find_dstream_any(buf)?;
-        if let Some(ds) = &dstream {
-            // dstream is authoritative for file size; helps avoid bogus fixed-offset parsing.
+        // `j_inode_val_t` is packed: its fixed portion is exactly 92 bytes and
+        // is followed immediately by `xf_blob_t`.
+        let xfields = if buf.len() == J_INODE_VAL_FIXED_SIZE {
+            Vec::new()
+        } else {
+            // Preserve the historical best-effort behavior: an inode remains
+            // usable even when only its optional xfield tail is damaged.
+            parse_xfields(&buf[J_INODE_VAL_FIXED_SIZE..]).unwrap_or_default()
+        };
+        let dstream = xfields.iter().find_map(InodeXField::as_dstream);
+        if let Some(ds) = &dstream
+            && internal_flags & INODE_HAS_UNCOMPRESSED_SIZE == 0
+        {
+            // For ordinary files the dstream is authoritative. Compressed
+            // inodes explicitly mark the fixed uncompressed_size field as
+            // meaningful, so do not replace it with a compressed stream size.
             uncompressed_size = ds.size;
         }
 
@@ -169,7 +316,21 @@ impl InodeVal {
             mode,
             uncompressed_size,
             dstream,
+            xfields,
         })
+    }
+
+    /// Returns the first inode extended field of the requested type.
+    pub fn xfield(&self, field_type: u8) -> Option<&InodeXField> {
+        self.xfields
+            .iter()
+            .find(|field| field.field_type == field_type)
+    }
+
+    /// Whether inode metadata indicates filesystem compression (`decmpfs`).
+    pub fn is_compressed(&self) -> bool {
+        self.bsd_flags & BSD_UF_COMPRESSED != 0
+            || self.internal_flags & INODE_HAS_UNCOMPRESSED_SIZE != 0
     }
 
     /// Returns a string representation of the inode metadata formatted as a table.
@@ -245,85 +406,88 @@ pub fn fmt_apfs_ns_utc(ns: u64) -> String {
     }
 }
 
-fn parse_xfields_find_dstream_any(buf: &[u8]) -> Result<Option<JDStream>, String> {
-    // Common observed starts for xf_blob_t in j_inode_val_t variants.
-    // Keep these first for fast-path parsing.
-    for start in [96usize, 92, 88, 84] {
-        if start >= buf.len() {
-            continue;
-        }
-        match parse_xfields_find_dstream(&buf[start..]) {
-            Ok(Some(ds)) => return Ok(Some(ds)),
-            Ok(None) => {}
-            // Best-effort parsing: malformed/variant xfields must not make the
-            // whole inode unreadable.
-            Err(_) => {}
-        }
-    }
-
-    // Fallback: slide over a bounded range to catch layout variants where
-    // xfields are shifted by additional headers.
-    if buf.len() > 68 {
-        let end = buf.len().saturating_sub(4).min(256);
-        for start in 64usize..end {
-            match parse_xfields_find_dstream(&buf[start..]) {
-                Ok(Some(ds)) => return Ok(Some(ds)),
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn parse_xfields_find_dstream(xfields: &[u8]) -> Result<Option<JDStream>, String> {
-    // xf_blob_t: u16 num_exts, u16 used_data, followed by x_field_t entries + data.
+/// Parses one packed `xf_blob_t` and retains every extended field.
+///
+/// `xf_used_data` is the size of the value area alone (descriptor bytes are not
+/// included). Each value begins at an eight-byte-aligned offset within that
+/// area. This is deliberately strict and bounds checked; `InodeVal::parse`
+/// treats an invalid optional tail as absent so core inode metadata remains
+/// available on damaged evidence.
+fn parse_xfields(xfields: &[u8]) -> Result<Vec<InodeXField>, String> {
     if xfields.len() < 4 {
-        return Ok(None);
+        return Err("xf_blob_t too small".into());
     }
+
     let num = u16::from_le_bytes(xfields[0..2].try_into().unwrap()) as usize;
     let used = u16::from_le_bytes(xfields[2..4].try_into().unwrap()) as usize;
-    if num == 0 || used == 0 || xfields.len() < 4 + used {
-        return Ok(None);
+    if num == 0 {
+        return if used == 0 {
+            Ok(Vec::new())
+        } else {
+            Err("xf_blob_t has value bytes but no descriptors".into())
+        };
     }
 
-    // x_field_t is 4 bytes: u8 type, u8 flags, u16 size
-    let mut meta_off = 4;
-    // Data section starts after the header (4 bytes) and all meta entries (num * 4 bytes).
-    let data_section_start = 4 + (num * 4);
-    if data_section_start > xfields.len() {
-        return Ok(None);
+    let descriptors_len = num
+        .checked_mul(4)
+        .ok_or_else(|| "xf_blob_t descriptor size overflow".to_string())?;
+    let data_start = 4usize
+        .checked_add(descriptors_len)
+        .ok_or_else(|| "xf_blob_t data offset overflow".to_string())?;
+    if data_start > xfields.len() {
+        return Err(format!(
+            "xf_blob_t descriptor table is truncated: descriptors={}, available={}",
+            descriptors_len,
+            xfields.len().saturating_sub(4)
+        ));
     }
-    // Track offset within the data section; each entry's data is 8-byte aligned within it.
-    let mut data_off_in_section = 0usize;
+    let available_values = xfields.len() - data_start;
+    let usable_values = used.min(available_values);
+    if used > available_values {
+        log::warn!(
+            "truncated inode xf_blob_t value area: declared={}, available={}; retaining valid prefix",
+            used,
+            available_values
+        );
+    }
 
-    for _ in 0..num {
-        if meta_off + 4 > xfields.len() {
-            break;
-        }
-        let x_type = xfields[meta_off];
-        let _x_flags = xfields[meta_off + 1];
-        let x_size =
-            u16::from_le_bytes(xfields[meta_off + 2..meta_off + 4].try_into().unwrap()) as usize;
-        meta_off += 4;
-
-        // 8-byte alignment is within the data section, not from the xf_blob start.
-        let aligned_in_section = (data_off_in_section + 7) & !7;
-        let abs_off = data_section_start + aligned_in_section;
-
-        if abs_off + x_size > xfields.len() {
-            break;
-        }
-        let data = &xfields[abs_off..abs_off + x_size];
-        if x_type == INO_EXT_TYPE_DSTREAM
-            && let Ok(ds) = JDStream::parse(data) {
-                return Ok(Some(ds));
+    let mut out = Vec::with_capacity(num);
+    let mut value_offset = 0usize;
+    for index in 0..num {
+        let descriptor = 4 + index * 4;
+        let field_type = xfields[descriptor];
+        let flags = xfields[descriptor + 1];
+        let size = u16::from_le_bytes(xfields[descriptor + 2..descriptor + 4].try_into().unwrap())
+            as usize;
+        let aligned = value_offset
+            .checked_add(7)
+            .map(|offset| offset & !7)
+            .ok_or_else(|| "xf_blob_t alignment overflow".to_string())?;
+        let end = aligned
+            .checked_add(size)
+            .ok_or_else(|| "xf_blob_t field size overflow".to_string())?;
+        if end > usable_values {
+            if out.is_empty() {
+                return Err(format!(
+                    "xf_blob_t field {index} exceeds value area: offset={aligned}, size={size}, usable={usable_values}"
+                ));
             }
-        data_off_in_section = aligned_in_section + x_size;
+            log::warn!(
+                "xf_blob_t field {} exceeds value area; retaining {} valid preceding field(s)",
+                index,
+                out.len()
+            );
+            break;
+        }
+        out.push(InodeXField {
+            field_type,
+            flags,
+            data: xfields[data_start + aligned..data_start + end].to_vec(),
+        });
+        value_offset = end;
     }
 
-    Ok(None)
+    Ok(out)
 }
 
 /// Directory entry record returned from `dir_children`.
@@ -354,6 +518,87 @@ pub struct FileExtent {
     pub length_bytes: u64,
     /// Cryptographic identifier for the extent data.
     pub crypto_id: u64,
+}
+
+fn parse_xattr_record(key: &[u8], value: &[u8]) -> Result<XattrRecord, String> {
+    let header = JKey::from_bytes(key).ok_or_else(|| "xattr key is too small".to_string())?;
+    if header.obj_type != APFS_TYPE_XATTR {
+        return Err(format!(
+            "expected xattr key type {APFS_TYPE_XATTR}, got {}",
+            header.obj_type
+        ));
+    }
+    if key.len() < 10 {
+        return Err("j_xattr_key_t too small".into());
+    }
+    let name_len = u16::from_le_bytes(key[8..10].try_into().unwrap()) as usize;
+    if name_len == 0 || 10usize.saturating_add(name_len) > key.len() {
+        return Err(format!(
+            "invalid xattr name length {name_len} for key size {}",
+            key.len()
+        ));
+    }
+    let raw_name = &key[10..10 + name_len];
+    let raw_name = raw_name.strip_suffix(&[0]).unwrap_or(raw_name);
+    let name = std::str::from_utf8(raw_name)
+        .map_err(|e| format!("xattr name is not UTF-8: {e}"))?
+        .to_string();
+
+    if value.len() < 4 {
+        return Err("j_xattr_val_t too small".into());
+    }
+    let flags = u16::from_le_bytes(value[0..2].try_into().unwrap());
+    let declared_data_len = u16::from_le_bytes(value[2..4].try_into().unwrap());
+    let has_stream = flags & XATTR_DATA_STREAM != 0;
+    let has_embedded = flags & XATTR_DATA_EMBEDDED != 0;
+    if has_stream && has_embedded {
+        return Err("xattr cannot be both embedded and data-stream backed".into());
+    }
+
+    // Apple permits xdata_len == 0 for embedded values. In that case the
+    // B-tree value length is the only authoritative boundary.
+    let actual_len = if declared_data_len == 0 && has_embedded {
+        value.len() - 4
+    } else {
+        declared_data_len as usize
+    };
+    if actual_len > value.len() - 4 {
+        return Err(format!(
+            "xattr value is truncated: declared={actual_len}, available={}",
+            value.len() - 4
+        ));
+    }
+    let data = &value[4..4 + actual_len];
+
+    let storage = if has_stream {
+        if data.len() < 48 {
+            return Err(format!(
+                "j_xattr_dstream_t too small: expected 48 bytes, got {}",
+                data.len()
+            ));
+        }
+        let xattr_obj_id = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        XattrStorage::DataStream {
+            xattr_obj_id,
+            dstream: JDStream::parse(&data[8..48])?,
+        }
+    } else if has_embedded {
+        XattrStorage::Embedded {
+            data: data.to_vec(),
+        }
+    } else {
+        XattrStorage::Unknown {
+            data: data.to_vec(),
+        }
+    };
+
+    Ok(XattrRecord {
+        owner_id: header.obj_id,
+        name,
+        flags,
+        declared_data_len,
+        storage,
+    })
 }
 
 /// Filesystem-tree access wrapper bound to a volume OMAP and transaction ID.
@@ -516,9 +761,10 @@ impl FsTree {
 
         self.build_inode_indexes(apfs)?;
         if let Some(idx) = self.inode_lookup.borrow().as_ref()
-            && let Some(inode) = idx.get(&inode_id) {
-                return Ok(Some(inode.clone()));
-            }
+            && let Some(inode) = idx.get(&inode_id)
+        {
+            return Ok(Some(inode.clone()));
+        }
         Ok(None)
     }
 
@@ -646,27 +892,161 @@ impl FsTree {
         Ok(out)
     }
 
+    /// Lists all extended attributes owned by one inode/object identifier.
+    pub fn xattrs_for_inode<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        inode_id: u64,
+    ) -> Result<Vec<XattrRecord>, String> {
+        apfs.set_active_omap(Some(self.omap.clone()), self.xid);
+
+        let prefix = JKey::to_bytes(inode_id, APFS_TYPE_XATTR);
+        let mut cur = self.root_tree.seek(apfs, &prefix, &BTreeKeyCmp::ApfsJKey)?;
+        let mut out = Vec::new();
+        while let Some((key, value)) = cur.next(apfs)? {
+            let Some(header) = JKey::from_bytes(&key) else {
+                continue;
+            };
+            if header.obj_id != inode_id || header.obj_type != APFS_TYPE_XATTR {
+                break;
+            }
+            match parse_xattr_record(&key, &value) {
+                Ok(record) => out.push(record),
+                Err(error) => log::warn!(
+                    "inode {}: skipping malformed APFS xattr record: {}",
+                    inode_id,
+                    error
+                ),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reads one named extended attribute, resolving data-stream extents when
+    /// necessary. Returns `Ok(None)` if the inode has no attribute by that name.
+    pub fn read_xattr<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        inode_id: u64,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some(record) = self
+            .xattrs_for_inode(apfs, inode_id)?
+            .into_iter()
+            .find(|record| record.name == name)
+        else {
+            return Ok(None);
+        };
+        self.read_xattr_record(apfs, &record).map(Some)
+    }
+
+    /// Reads the value represented by a previously parsed xattr record.
+    ///
+    /// Stream extents are returned raw. Encrypted extents still require volume
+    /// crypto support at a higher layer.
+    pub fn read_xattr_record<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        record: &XattrRecord,
+    ) -> Result<Vec<u8>, String> {
+        match &record.storage {
+            XattrStorage::Embedded { data } | XattrStorage::Unknown { data } => Ok(data.clone()),
+            XattrStorage::DataStream {
+                xattr_obj_id,
+                dstream,
+            } => self.read_dstream(apfs, *xattr_obj_id, dstream),
+        }
+    }
+
+    /// Reads an APFS data stream from file extents owned by `stream_object_id`.
+    pub fn read_dstream<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        stream_object_id: u64,
+        dstream: &JDStream,
+    ) -> Result<Vec<u8>, String> {
+        if dstream.size > MAX_XATTR_READ_BYTES {
+            return Err(format!(
+                "refusing to allocate APFS data stream of {} bytes (cap={} bytes)",
+                dstream.size, MAX_XATTR_READ_BYTES
+            ));
+        }
+        let output_len = usize::try_from(dstream.size)
+            .map_err(|_| format!("data stream size does not fit usize: {}", dstream.size))?;
+        let mut output = vec![0u8; output_len];
+        let mut extents = self.file_extents(apfs, stream_object_id)?;
+        extents.sort_unstable_by_key(|extent| extent.logical_addr);
+
+        for extent in extents {
+            if extent.logical_addr >= dstream.size || extent.phys_block_num == 0 {
+                continue;
+            }
+            let remaining = dstream.size - extent.logical_addr;
+            let copy_len = extent.length_bytes.min(remaining);
+            let target_start = usize::try_from(extent.logical_addr).map_err(|_| {
+                format!(
+                    "data stream logical offset does not fit usize: {}",
+                    extent.logical_addr
+                )
+            })?;
+            let copy_len = usize::try_from(copy_len)
+                .map_err(|_| format!("data stream extent length does not fit usize: {copy_len}"))?;
+            let block_size = apfs.block_size_u64();
+            let bytes =
+                crate::io::read_phys(&mut apfs.body, block_size, extent.phys_block_num, copy_len)?;
+            output[target_start..target_start + copy_len].copy_from_slice(&bytes);
+        }
+
+        Ok(output)
+    }
+
     /// Scans the entire BTree sequentially and returns all Inodes and Directory Records.
     /// This avoids O(N log N) disk seeks during full filesystem enumeration.
     pub fn scan_all_records<T: std::io::Read + std::io::Seek>(
         &self,
         apfs: &mut crate::APFS<T>,
-        mut progress: Option<&mut dyn FnMut(usize)>,
+        progress: Option<&mut dyn FnMut(usize)>,
     ) -> Result<ScanAllRecordsResult, String> {
+        let (inodes, drecs, _) = self.scan_all_records_internal(apfs, progress, false)?;
+        Ok((inodes, drecs))
+    }
+
+    /// Scans the filesystem B-tree once and returns inodes, directory records,
+    /// and an owner-id keyed xattr map.
+    ///
+    /// This is the bulk-indexing counterpart to [`FsTree::xattrs_for_inode`];
+    /// callers avoid one B-tree seek per indexed inode while the legacy
+    /// [`FsTree::scan_all_records`] API remains unchanged.
+    pub fn scan_all_records_with_xattrs<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        progress: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<ScanAllRecordsWithXattrsResult, String> {
+        self.scan_all_records_internal(apfs, progress, true)
+    }
+
+    fn scan_all_records_internal<T: std::io::Read + std::io::Seek>(
+        &self,
+        apfs: &mut crate::APFS<T>,
+        mut progress: Option<&mut dyn FnMut(usize)>,
+        collect_xattrs: bool,
+    ) -> Result<ScanAllRecordsWithXattrsResult, String> {
         apfs.set_active_omap(Some(self.omap.clone()), self.xid);
         let mut cur = self.root_tree.seek(apfs, &[], &BTreeKeyCmp::Lex)?;
 
         let mut inodes = std::collections::HashMap::new();
         let mut raw_drecs = Vec::new();
+        let mut xattrs = std::collections::HashMap::<u64, Vec<XattrRecord>>::new();
         let mut private_to_id = std::collections::HashMap::new();
         let mut scanned = 0;
 
         while let Some((k, v)) = cur.next(apfs)? {
             scanned += 1;
             if scanned % 10000 == 0
-                && let Some(cb) = progress.as_mut() {
-                    cb(scanned);
-                }
+                && let Some(cb) = progress.as_mut()
+            {
+                cb(scanned);
+            }
             let Some(hdr) = JKey::from_bytes(&k) else {
                 continue;
             };
@@ -689,6 +1069,15 @@ impl FsTree {
                         },
                     ));
                 }
+            } else if collect_xattrs && hdr.obj_type == APFS_TYPE_XATTR {
+                match parse_xattr_record(&k, &v) {
+                    Ok(record) => xattrs.entry(hdr.obj_id).or_default().push(record),
+                    Err(error) => log::warn!(
+                        "inode {}: skipping malformed APFS xattr record during scan: {}",
+                        hdr.obj_id,
+                        error
+                    ),
+                }
             }
         }
 
@@ -707,7 +1096,7 @@ impl FsTree {
             drecs.entry(parent_id).or_default().push(entry);
         }
 
-        Ok((inodes, drecs))
+        Ok((inodes, drecs, xattrs))
     }
 
     /// Heuristic root inode detection for a volume.
@@ -717,9 +1106,10 @@ impl FsTree {
         apfs: &mut crate::APFS<T>,
     ) -> Result<Option<u64>, String> {
         if let Some(inode2) = self.inode_by_id(apfs, 2)?
-            && is_dir_mode(inode2.mode) {
-                return Ok(Some(2));
-            }
+            && is_dir_mode(inode2.mode)
+        {
+            return Ok(Some(2));
+        }
         Ok(None)
     }
 }
