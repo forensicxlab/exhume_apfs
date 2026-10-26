@@ -439,11 +439,10 @@ impl BTree {
             for has_obj_header in parse_modes {
                 match Node::parse(&buf, read_len, has_obj_header) {
                     Ok(v) => {
-                        if has_obj_header
-                            && let Err(e) = v.hdr.obj.validate(&buf) {
-                                last_err = e;
-                                continue;
-                            }
+                        if has_obj_header && let Err(e) = v.hdr.obj.validate(&buf) {
+                            last_err = e;
+                            continue;
+                        }
                         root_opt = Some(v);
                         break;
                     }
@@ -563,10 +562,9 @@ impl BTree {
                         let Ok(n) = parsed else {
                             continue;
                         };
-                        if n.has_obj_header
-                            && n.hdr.obj.validate(&b).is_err() {
-                                continue;
-                            }
+                        if n.has_obj_header && n.hdr.obj.validate(&b).is_err() {
+                            continue;
+                        }
                         loaded = Some((paddr, b));
                         break;
                     }
@@ -600,9 +598,10 @@ impl BTree {
     ) -> Result<Option<Vec<u8>>, String> {
         let mut cur = self.seek(apfs, key, cmp)?;
         if let Some((k, v)) = cur.current(apfs)?
-            && cmp_keys(cmp, &k, key) == std::cmp::Ordering::Equal {
-                return Ok(Some(v));
-            }
+            && cmp_keys(cmp, &k, key) == std::cmp::Ordering::Equal
+        {
+            return Ok(Some(v));
+        }
         Ok(None)
     }
 

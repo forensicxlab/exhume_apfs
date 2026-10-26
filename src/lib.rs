@@ -891,20 +891,22 @@ impl<T: Read + Seek> APFS<T> {
                 break;
             }
             if let Some(h) = crate::fstree::JKey::from_bytes(&k)
-                && h.obj_type == 1 && v.len() >= 16 {
-                    let p0 = u64::from_le_bytes(v[0..8].try_into().unwrap());
-                    let p1 = u64::from_le_bytes(v[8..16].try_into().unwrap());
-                    if let Some(found) =
-                        self.try_snapshot_apsb_fallback(vol, omap, effective_xid, p0)?
-                    {
-                        return Ok(Some(found));
-                    }
-                    if let Some(found) =
-                        self.try_snapshot_apsb_fallback(vol, omap, effective_xid, p1)?
-                    {
-                        return Ok(Some(found));
-                    }
+                && h.obj_type == 1
+                && v.len() >= 16
+            {
+                let p0 = u64::from_le_bytes(v[0..8].try_into().unwrap());
+                let p1 = u64::from_le_bytes(v[8..16].try_into().unwrap());
+                if let Some(found) =
+                    self.try_snapshot_apsb_fallback(vol, omap, effective_xid, p0)?
+                {
+                    return Ok(Some(found));
                 }
+                if let Some(found) =
+                    self.try_snapshot_apsb_fallback(vol, omap, effective_xid, p1)?
+                {
+                    return Ok(Some(found));
+                }
+            }
 
             let slots = (v.len() / 8).min(32);
             for i in 0..slots {
@@ -938,47 +940,48 @@ impl<T: Read + Seek> APFS<T> {
 
         for oid in candidates {
             if let Ok((xid, _m)) = omap.lookup_with_key_xid(self, oid, effective_xid)
-                && let Ok(tree) = crate::btree::BTree::open_virtual(self, oid, omap, xid) {
-                    let trial = crate::fstree::FsTree::new(omap.clone(), tree.clone(), xid);
-                    match trial.detect_root_inode_id(self) {
-                        Ok(Some(_)) => {
-                            warn!(
-                                "snapshot fallback: selected virtual candidate root_tree_oid={} xid={}",
-                                oid, xid
-                            );
-                            return Ok(Some((tree, xid, oid)));
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(
-                                "snapshot fallback: virtual candidate oid={} xid={} probe error: {}",
-                                oid, xid, e
-                            );
-                        }
+                && let Ok(tree) = crate::btree::BTree::open_virtual(self, oid, omap, xid)
+            {
+                let trial = crate::fstree::FsTree::new(omap.clone(), tree.clone(), xid);
+                match trial.detect_root_inode_id(self) {
+                    Ok(Some(_)) => {
+                        warn!(
+                            "snapshot fallback: selected virtual candidate root_tree_oid={} xid={}",
+                            oid, xid
+                        );
+                        return Ok(Some((tree, xid, oid)));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(
+                            "snapshot fallback: virtual candidate oid={} xid={} probe error: {}",
+                            oid, xid, e
+                        );
                     }
                 }
+            }
 
             if oid < self.nx.block_count
-                && let Ok(tree) = crate::btree::BTree::open_physical(self, oid) {
-                    let trial =
-                        crate::fstree::FsTree::new(omap.clone(), tree.clone(), effective_xid);
-                    match trial.detect_root_inode_id(self) {
-                        Ok(Some(_)) => {
-                            warn!(
-                                "snapshot fallback: selected physical candidate paddr={} xid={}",
-                                oid, effective_xid
-                            );
-                            return Ok(Some((tree, effective_xid, oid)));
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(
-                                "snapshot fallback: physical candidate paddr={} probe error: {}",
-                                oid, e
-                            );
-                        }
+                && let Ok(tree) = crate::btree::BTree::open_physical(self, oid)
+            {
+                let trial = crate::fstree::FsTree::new(omap.clone(), tree.clone(), effective_xid);
+                match trial.detect_root_inode_id(self) {
+                    Ok(Some(_)) => {
+                        warn!(
+                            "snapshot fallback: selected physical candidate paddr={} xid={}",
+                            oid, effective_xid
+                        );
+                        return Ok(Some((tree, effective_xid, oid)));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(
+                            "snapshot fallback: physical candidate paddr={} probe error: {}",
+                            oid, e
+                        );
                     }
                 }
+            }
         }
 
         warn!("snapshot fallback: no viable alternate fs tree");
@@ -1066,9 +1069,10 @@ impl<T: Read + Seek> APFS<T> {
             let mut omap_paddrs = Vec::<u64>::new();
             if let Ok(container_omap) = self.open_container_omap_for_xid(xid)
                 && let Ok(m) = container_omap.lookup(self, vol.omap_oid, xid)
-                    && m.paddr < self.nx.block_count {
-                        omap_paddrs.push(m.paddr);
-                    }
+                && m.paddr < self.nx.block_count
+            {
+                omap_paddrs.push(m.paddr);
+            }
             if vol.omap_oid < self.nx.block_count && !omap_paddrs.contains(&vol.omap_oid) {
                 omap_paddrs.push(vol.omap_oid);
             }

@@ -1005,9 +1005,17 @@ impl FsTree {
     pub fn scan_all_records<T: std::io::Read + std::io::Seek>(
         &self,
         apfs: &mut crate::APFS<T>,
-        progress: Option<&mut dyn FnMut(usize)>,
+        mut progress: Option<&mut dyn FnMut(usize)>,
     ) -> Result<ScanAllRecordsResult, String> {
-        let (inodes, drecs, _) = self.scan_all_records_internal(apfs, progress, false)?;
+        let mut forward = |count: usize| {
+            if count.is_multiple_of(10_000)
+                && let Some(callback) = progress.as_mut()
+            {
+                callback(count);
+            }
+            Ok(())
+        };
+        let (inodes, drecs, _) = self.scan_all_records_internal(apfs, Some(&mut forward), false)?;
         Ok((inodes, drecs))
     }
 
@@ -1016,11 +1024,13 @@ impl FsTree {
     ///
     /// This is the bulk-indexing counterpart to [`FsTree::xattrs_for_inode`];
     /// callers avoid one B-tree seek per indexed inode while the legacy
-    /// [`FsTree::scan_all_records`] API remains unchanged.
+    /// [`FsTree::scan_all_records`] API remains unchanged. The callback is
+    /// fallible and runs during scanning and reference resolution, allowing
+    /// callers to interrupt preparation for cancellation or sink failures.
     pub fn scan_all_records_with_xattrs<T: std::io::Read + std::io::Seek>(
         &self,
         apfs: &mut crate::APFS<T>,
-        progress: Option<&mut dyn FnMut(usize)>,
+        progress: Option<&mut dyn FnMut(usize) -> Result<(), String>>,
     ) -> Result<ScanAllRecordsWithXattrsResult, String> {
         self.scan_all_records_internal(apfs, progress, true)
     }
@@ -1028,7 +1038,7 @@ impl FsTree {
     fn scan_all_records_internal<T: std::io::Read + std::io::Seek>(
         &self,
         apfs: &mut crate::APFS<T>,
-        mut progress: Option<&mut dyn FnMut(usize)>,
+        mut progress: Option<&mut dyn FnMut(usize) -> Result<(), String>>,
         collect_xattrs: bool,
     ) -> Result<ScanAllRecordsWithXattrsResult, String> {
         apfs.set_active_omap(Some(self.omap.clone()), self.xid);
@@ -1042,10 +1052,8 @@ impl FsTree {
 
         while let Some((k, v)) = cur.next(apfs)? {
             scanned += 1;
-            if scanned % 10000 == 0
-                && let Some(cb) = progress.as_mut()
-            {
-                cb(scanned);
+            if let Some(callback) = progress.as_mut() {
+                callback(scanned)?;
             }
             let Some(hdr) = JKey::from_bytes(&k) else {
                 continue;
@@ -1084,7 +1092,10 @@ impl FsTree {
         // Resolve inode_ids for all drecs
         let mut drecs: std::collections::HashMap<u64, Vec<DirEntry>> =
             std::collections::HashMap::new();
-        for (parent_id, mut entry) in raw_drecs {
+        for (index, (parent_id, mut entry)) in raw_drecs.into_iter().enumerate() {
+            if let Some(callback) = progress.as_mut() {
+                callback(scanned + index + 1)?;
+            }
             if inodes.contains_key(&entry.raw_id) {
                 entry.inode_id = Some(entry.raw_id);
             } else if let Some(id) = private_to_id.get(&entry.raw_id) {
